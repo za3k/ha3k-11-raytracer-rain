@@ -1,0 +1,4 @@
+raytrace-cpu
+raytrace-cuda
+*.png
+*.mkv

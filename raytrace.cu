@@ -12,18 +12,17 @@ extern "C" {
 
 #define W 400
 #define H 300
-#define MAX_OBJECTS 30
+#define MAX_OBJECTS 3000
 #define SAMPLES 1
 #define MAX_BOUNCES 5
 #define PIXELS (W*H)
 #define THREADS 256
 #define BLOCKS (ceil(PIXELS * 1.0) / THREADS)
-#define OUTFILE "raytrace-200x150.mkv"
 #define OUTPUT_VIDEO 1
 // Only affects the video file output--rendered output is always as fast as possible.
 #define FRAMERATE 60
 
-#define ZOOM 4
+#define ZOOM 1
 
 /* Types */
 typedef double sc; // scalar
@@ -31,18 +30,19 @@ typedef struct { sc x, y, z; } vec;
 typedef struct { unsigned char b, g, r, a; } pix;
 
 /* Vectors */
-__device__ inline static sc dot(vec aa, vec bb)   { return aa.x*bb.x + aa.y*bb.y + aa.z*bb.z; }
-__device__ inline static sc magsq(vec vv)         { return dot(vv, vv); }
-__device__ inline static vec scale(vec vv, sc c)  { vec rv = { vv.x*c, vv.y*c, vv.z*c }; return rv; }
+__host__ __device__ inline static sc dot(vec aa, vec bb)   { return aa.x*bb.x + aa.y*bb.y + aa.z*bb.z; }
+__host__ __device__ inline static sc magsq(vec vv)         { return dot(vv, vv); }
+__host__ __device__ inline static vec scale(vec vv, sc c)  { vec rv = { vv.x*c, vv.y*c, vv.z*c }; return rv; }
 __device__ inline static vec normalize(vec vv)    { return scale(vv, rnorm3d(vv.x, vv.y, vv.z)); }
-__device__ inline static vec add(vec aa, vec bb)  { vec rv = { aa.x+bb.x, aa.y+bb.y, aa.z+bb.z }; return rv; }
+__host__ inline static vec h_normalize(vec vv)    { return scale(vv, 1.0/sqrt(magsq(vv))); }
+__host__ __device__ inline static vec add(vec aa, vec bb)  { vec rv = { aa.x+bb.x, aa.y+bb.y, aa.z+bb.z }; return rv; }
 __device__ inline static vec sub(vec aa, vec bb)  { return add(aa, scale(bb, -1)); }
 __device__ inline static vec hadamard_product(vec aa, vec bb) { vec rv = { aa.x*bb.x, aa.y*bb.y, aa.z*bb.z }; return rv; }
 
 /* Ray-tracing types */
 typedef vec color;              // So as to reuse dot(vv,vv) and scale
 typedef struct { color albedo; sc reflectivity; sc fuzz; } material;
-typedef struct { vec cp; material ma; sc r; } sphere;
+typedef struct { vec cp; material ma; sc r; vec vel; vec acc; } sphere;
 typedef struct { sphere spheres[MAX_OBJECTS]; int nn; } world;
 typedef struct { vec start; vec dir; } ray; // dir is normalized!
 
@@ -54,6 +54,7 @@ __global__ void setup_kernel(curandState *state){
 }
 
 __host__ static sc random_double() { return (rand() / (RAND_MAX + 1.0)); } // [0, 1)
+__host__ static sc random_double(double min, double max) { return (max-min)*random_double() + min; } // [min, max)
 __host__ static color random_color() { vec v = { random_double(), random_double(), random_double() }; return v; }
 
 __device__ static sc d_random_double(curandState *d_randstate) { return curand_uniform_double(d_randstate); }
@@ -187,17 +188,18 @@ __global__ void render_pixels(curandState *randstate, const world *here, pix *re
 static void render(curandState *d_randstate, world *h_here, ypic fb, FILE *rgb24_stream)
 {
   // Copy the world to the GPU
-  world *d_here;
-  cudaMalloc(&d_here, sizeof(world));
+  static world *d_here = 0;
+  if (d_here == 0) cudaMalloc(&d_here, sizeof(world));
   cudaMemcpy(d_here, h_here, sizeof(world), cudaMemcpyHostToDevice);
 
   // Allocate space for the result
-  pix *d_result;
-  cudaMalloc(&d_result, sizeof(pix)*PIXELS);
+  static pix *d_result = 0;
+  if (d_result == 0) cudaMalloc(&d_result, sizeof(pix)*PIXELS);
 
   // Calculate the pixels
   render_pixels<<<BLOCKS, THREADS>>>(d_randstate, d_here, d_result);
-  pix *h_result = (pix *)malloc(sizeof(color)*PIXELS);
+  static pix *h_result;
+  if (h_result == 0) h_result = (pix *)malloc(sizeof(color)*PIXELS);
   cudaMemcpy(h_result, d_result, PIXELS * sizeof(pix), cudaMemcpyDeviceToHost);
 
   // Render to yeso
@@ -227,37 +229,89 @@ static void render(curandState *d_randstate, world *h_here, ypic fb, FILE *rgb24
 }
 
 // Ground
-sphere ground  = { .cp = {0,  -1000, 5}, .ma = { .albedo = {0.5, 0.5, 0.5} }, .r = 1000 };
-// Sphere 1, reflective (fuzzier)
-sphere sphere1 = { .cp = {-2, 1.0,   5}, .ma = { .albedo = {0.7, 0.7, 0.7}, .reflectivity = 1.0, .fuzz = 0.3 }, .r = 1 };
-// Sphere 2, matte brown
-sphere sphere2 = { .cp = {0,  1.0, 5},   .ma = { .albedo = {0.4, 0.2, 0.1} }, .r = 1 };
-// Sphere 3, reflective
-sphere sphere3 = { .cp = {2,  1.0, 5},    .ma = { .albedo = {0.5, 0.5, 0.5}, .reflectivity = 1.0, }, .r = 1 };
-void scene(world *here) {
-  sc ALT = -2.0;
-  sc RAD = 0.2;
+sphere ground  = { .cp = {0, -1005, 0}, .ma = { .albedo = {0.5, 0.5, 0.5}, .reflectivity = 1.0 }, .r = 1000 };
 
-  here->spheres[here->nn++] = ground;
-  here->spheres[here->nn++] = sphere1;
-  here->spheres[here->nn++] = sphere2;
-  here->spheres[here->nn++] = sphere3;
 
-  for (int a=-2; a<=2; a++) {
-    for (int b=3; b<=7; b++) {
-      // Add a sphere
-      sphere *s = &here->spheres[here->nn++];
-      s->cp.x = a + 0.9*random_double();
-      s->cp.y = RAD;
-      s->cp.z = b + 0.9*random_double();
-      s->r = RAD;
-      s->ma.reflectivity = random_double() > 0.8;
-      s->ma.fuzz = random_double();
-      s->ma.albedo = random_color();
+void deleteObject(world *here, int i) {
+    memcpy(&here->spheres[i], &here->spheres[i+1], sizeof(sphere) * (here->nn - i));
+    here->nn--;
+}
+
+void addObject(world *here, sphere *s) {
+    if (here->nn >= MAX_OBJECTS) return;
+    memcpy(&here->spheres[here->nn], s, sizeof(sphere));
+    here->nn++;
+}
+
+sphere* createRandom() {
+    static sphere ran;
+    ran.r = random_double(0.6, 1.2);
+    ran.cp.x = random_double(-10.0, 10.0);
+    ran.cp.z = random_double(5.0, 10.0);
+    ran.cp.y = random_double(10.0, 30.0);
+    ran.vel.x = ran.vel.z = 0.0;
+    ran.acc.y = -0.015;
+    ran.acc.x = ran.acc.z = 0;
+    ran.acc.y = -0.001;
+    ran.ma.albedo = random_color();
+    if (random_double() > 0.8) {
+        ran.ma.reflectivity = 1;
+        ran.ma.fuzz = random_double(0, 0.5);
+    }
+
+    return &ran;
+}
+
+int isSmall(sphere *s) {
+    return (s->r <= 0.5);
+}
+
+sphere* createDroplet(sphere *s) {
+    static sphere drop;
+    drop.r = random_double(0.1, 0.2);
+    drop.cp = s->cp;
+    drop.cp.y -= 0.9 * s->r;
+    drop.vel = s->vel;
+    drop.vel.y = random_double(0, -drop.vel.y * 0.8);
+    double SPEED = 0.04;
+
+    drop.vel.x += random_double(-SPEED, SPEED);
+    drop.vel.z += random_double(-SPEED, SPEED);
+    drop.acc = s->acc;
+    drop.ma.reflectivity = s->ma.reflectivity;
+    drop.ma.albedo = add(scale(random_color(), 0.5), s->ma.albedo);
+    if (magsq(drop.ma.albedo) > 1.0) drop.ma.albedo = h_normalize(drop.ma.albedo);
+
+    return &drop;
+}
+void explode(world *here, sphere *s) {
+    for (int i = 0; i<20; i++) addObject(here, createDroplet(s));
+}
+int inWorld(sphere *s) {
+    if (s->r > 500) return true; // Ground is always in the world.
+    else if (isSmall(s)) return (s->cp.y + s->r < 5.1); // Underwater?
+    else return (s->cp.y - s->r > -5.1); // Touching water?
+}
+
+void tick(world *here) {
+  for (int i=0; i<here->nn; ++i) {
+    sphere *s = &here->spheres[i];
+    if (inWorld(s)) {
+        // Move
+        s->vel = add(s->acc, s->vel);
+        s->cp = add(s->cp, s->vel);
+    } else {
+        if (!isSmall(s)) {
+            explode(here, s);
+            addObject(here, createRandom());
+        }
+        deleteObject(here, i);
     }
   }
-
-  for (int i=0; i<here->nn; i++) here->spheres[i].cp.y += ALT;
+  while (here->nn < 10) addObject(here, createRandom());
+}
+void scene(world *here) {
+    addObject(here, &ground);
 }
 
 int main(int argc, char **argv) {
@@ -267,7 +321,7 @@ int main(int argc, char **argv) {
   setup_kernel<<<1, 1024>>>(d_randstate);
 
   // Set up world
-  world here = {0};
+  static world here = {0};
   scene(&here);
 
   // Set up yeso
@@ -275,23 +329,23 @@ int main(int argc, char **argv) {
 
   // Set up video output (via ffmpeg)
   char CMD[1000];
+  char OUTFILE[100];
+  sprintf(OUTFILE, "raytrace-%dx%d-%d_sample.mkv", W, H, SAMPLES);
   sprintf(CMD, "ffmpeg -f rawvideo -pix_fmt rgb24 -r %d -s:v %dx%d -loglevel 16 -i - -c:v libx264 -preset veryslow -crf 0 -pix_fmt yuv444p -y -- %s", FRAMERATE, W, H, OUTFILE);
   FILE *stream = OUTPUT_VIDEO ? popen(CMD, "w") : 0;
 
   // Set up fps timer
   clock_t start = clock(), stop;
 
-  for (int frame=1; frame <= 600; ++frame) {
+  for (int frame=1; frame<1000; ++frame) {
+    tick(&here);
     ypic fb = yw_frame(w);
     render(d_randstate, &here, fb, stream);
     yw_flip(w);
-    for (int i=0; i<here.nn; i++) {
-      here.spheres[i].cp.y -= 0.005;
-    }
     stop = clock();
     int us = (stop-start)*1.0 / frame;
     if (!(frame & 0xff))
-      fprintf(stderr, "Render: %ldms (%0.1f fps)\n", us/1000, 1000000.0/us);
+      fprintf(stderr, "Render: %0.1f fps (%ldms for frame %d)\n", 1000000.0/us, us/1000, frame);
   }
 
   fclose(stream);

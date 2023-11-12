@@ -1,14 +1,16 @@
-A simple raytracer written in C.
+Cool [rain](https://youtu.be/FewtsNn8dg0) demo of a simple raytracer in action.
 
-Based on a [raytracer](http://canonical.org/~kragen/sw/aspmisc/raytracer.c) written written by [kragen](http://canonical.org/~kragen/sw/aspmisc/my-very-first-raytracer.html); and on [Ray Tracing in One Weekend](https://raytracing.github.io/books/RayTracingInOneWeekend.html) by Peter Shirley, Trevor David Black, Steve Hollasch.
+This simple simple raytracer written in C and CUDA. It's based on a [raytracer](http://canonical.org/~kragen/sw/aspmisc/raytracer.c) written written by [kragen](http://canonical.org/~kragen/sw/aspmisc/my-very-first-raytracer.html); and on [Ray Tracing in One Weekend](https://raytracing.github.io/books/RayTracingInOneWeekend.html) by Peter Shirley, Trevor David Black, Steve Hollasch.
 
-See a [video demo](https://youtu.be/y4TcrxRg4aw).
+This demo has 10-3000 objects on screen at a time. 10 main drops, plus tinier droplets that bounce off.
 
-## Raytracing Progress
----
-(Day 03): Write basic raytracer
+The below rendering times used a 4060Ti NVidia GPU.
 
-Fix reference image. Initial render takes 14.1s.
-Add CUDA support. Base render is now 621ms (1.6 fps) with no changes except to RNG.
-
-Reduce max bounces to 5, and move pixel byte computation to the GPU.
+Resolution | Samples   | Framerate
+==================================
+400x300    | 1/pixel   | 81.7 fps
+400x300    | 10/pixel  | 20.6 fps
+400x300    | 100/pixel | 2.4 fps
+1920x1080  | 1/pixel   | 5.4 fps
+1920x1080  | 10/pixel  | 1.4 fps
+1920x1080  | 100/pixel | 0.2 fps
